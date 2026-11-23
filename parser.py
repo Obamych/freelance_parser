@@ -3,7 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 URL = "https://kwork.ru/projects"
 
-def get_titles(html):
+def get_orders(html):
     soup = BeautifulSoup(html, "html.parser")
     for script in soup.find_all("script"):
         text = script.string or ""
@@ -17,30 +17,36 @@ def get_titles(html):
         projects = data["wantsListData"]["pagination"]["data"]
         if not isinstance(projects, list):
             raise ValueError("Ожидался список заказов")
-        titles = []
+        orders = []
         for project in projects:
             if not isinstance(project, dict):
                 continue
             title = project.get("name")
-            if isinstance(title, str) and title.strip():
-                titles.append(title.strip())
-        return titles
+            project_id = str(project.get("id", ""))
+            if not isinstance(title, str) or not title.strip():
+                continue
+            if not project_id.isascii() or not project_id.isdecimal() or project_id.startswith("0"):
+                continue
+            link = f"{URL}/{project_id}"
+            orders.append((title.strip(), link))
+        return orders
     raise ValueError("Список заказов не найден")
 
 def main():
     try:
         response = requests.get(URL, timeout=10)
         response.raise_for_status()
-        titles = get_titles(response.text)
+        orders = get_orders(response.text)
     except requests.RequestException:
         print("Не удалось загрузить страницу")
         return
     except (ValueError, KeyError, TypeError):
         print("Не удалось прочитать список заказов Kwork")
         return
-    print("Найдено заказов:", len(titles))
-    for title in titles:
+    print("Найдено заказов:", len(orders))
+    for title, link in orders:
         print(title)
+        print(link)
 
 if __name__ == "__main__":
     main()
