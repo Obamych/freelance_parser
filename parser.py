@@ -1,6 +1,9 @@
 import json
+import sqlite3
 import requests
 from bs4 import BeautifulSoup
+from storage import save_orders
+
 URL = "https://kwork.ru/projects"
 
 def get_orders(html):
@@ -47,6 +50,12 @@ def main():
     for title, link in orders:
         print(title)
         print(link)
+    try:
+        added = save_orders(orders)
+    except sqlite3.Error:
+        print("Не удалось сохранить заказы в базу")
+        return
+    print("Добавлено новых в базу:", added)
 
 if __name__ == "__main__":
     main()
