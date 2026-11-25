@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 from urllib.parse import urljoin, urlsplit
 import requests
@@ -7,6 +8,20 @@ from storage import save_orders
 
 KWORK_URL = "https://kwork.ru/projects"
 FREELANCE_URL = "https://freelance.ru/task"
+
+def kwork_budget(project):
+    price = str(project.get("priceLimit", ""))
+    if project.get("lang") != "ru" or not re.fullmatch(r"[0-9]{1,12}(\.[0-9]{1,2})?", price):
+        return None
+    rubles, _, coins = price.partition(".")
+    if int(rubles) == 0 and not coins.strip("0"):
+        return None
+
+    amount = f"{int(rubles):,}".replace(",", " ")
+    if coins.strip("0"):
+        amount += "," + coins.ljust(2, "0")
+    return "до " + amount + " ₽"
+
 
 def parse_kwork(html):
     soup = BeautifulSoup(html, "html.parser")
@@ -33,7 +48,7 @@ def parse_kwork(html):
             if not project_id.isascii() or not project_id.isdecimal() or project_id.startswith("0"):
                 continue
             link = f"{KWORK_URL}/{project_id}"
-            orders.append((title.strip(), link))
+            orders.append((title.strip(), link, kwork_budget(project)))
         return orders
     raise ValueError("Список заказов не найден")
 
@@ -52,7 +67,10 @@ def parse_freelance(html):
             continue
         task_id = address.path.removeprefix("/task/view/").rstrip("/")
         if task_id.isascii() and task_id.isdecimal() and not task_id.startswith("0"):
-            orders.append((title, f"{FREELANCE_URL}/view/{task_id}"))
+            card = item.find_parent(class_="task-card")
+            price = card.select_one(".task-card__budget") if card else None
+            budget = " ".join(price.get_text(" ", strip=True).split()) if price else ""
+            orders.append((title, f"{FREELANCE_URL}/view/{task_id}", budget or None))
     if not orders:
         raise ValueError("Ссылки на заказы не найдены")
     return orders
@@ -80,8 +98,9 @@ def main():
     if not orders:
         return
     print("Найдено заказов:", len(orders))
-    for title, link in orders:
+    for title, link, budget in orders:
         print(title)
+        print("Бюджет:", budget or "не указан")
         print(link)
     try:
         added = save_orders(orders)

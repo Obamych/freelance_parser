@@ -7,7 +7,10 @@ from fastapi.responses import HTMLResponse
 from storage import read_orders
 
 app = FastAPI()
-SOURCE_URLS = {"kwork": "https://kwork.ru/", "freelance": "https://freelance.ru/"}
+SOURCES = {
+    "kwork": ("https://kwork.ru/", "Kwork"),
+    "freelance": ("https://freelance.ru/", "Freelance.ru"),
+}
 
 def find_orders(q, source):
     try:
@@ -20,9 +23,14 @@ def find_orders(q, source):
     for order in orders:
         if query not in order["title"].casefold():
             continue
-        if source and not order["url"].startswith(SOURCE_URLS[source]):
+        if source and not order["url"].startswith(SOURCES[source][0]):
             continue
-        found.append(order)
+        name = "Неизвестен"
+        for prefix, label in SOURCES.values():
+            if order["url"].startswith(prefix):
+                name = label
+                break
+        found.append({**order, "source": name})
     return found
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)

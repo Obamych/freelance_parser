@@ -19,7 +19,9 @@ def orders_reply(query=""):
             return "Заказов пока нет. Сначала запусти parser.py."
         lines = []
         for order in orders[:5]:
-            lines.append(f"{order['title'][:200]}\n{order['url']}")
+            source = order.get("source") or "Неизвестен"
+            budget = order.get("budget") or "не указан"
+            lines.append(f"{order['title'][:200]}\nИсточник: {source}\nБюджет: {budget}\n{order['url']}")
         return "\n\n".join(lines)
     except (requests.RequestException, ValueError, KeyError, TypeError):
         return "Не удалось получить заказы. Проверь, что api.py запущен."
