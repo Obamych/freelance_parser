@@ -20,3 +20,17 @@ def save_orders(orders, database=DATABASE):
         return result.rowcount
     finally:
         connection.close()
+
+def read_orders(database=DATABASE):
+    if not database.exists():
+        return []
+    address = database.resolve().as_uri() + "?mode=ro"
+    connection = sqlite3.connect(address, uri=True)
+    try:
+        rows = connection.execute("SELECT title, url FROM orders ORDER BY rowid DESC").fetchall()
+    finally:
+        connection.close()
+    orders = []
+    for title, url in rows:
+        orders.append({"title": title, "url": url})
+    return orders
