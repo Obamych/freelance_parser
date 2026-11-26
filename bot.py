@@ -1,30 +1,81 @@
 import re
 import sys
+from datetime import datetime, timedelta, timezone
 from getpass import getpass
 from time import sleep
 import requests
 
 ORDERS_URL = "http://127.0.0.1:8000/orders"
+MOSCOW = timezone(timedelta(hours=3))
+SOURCE_BUTTONS = {"Kwork": "kwork", "Freelance.ru": "freelance"}
+MENU = {
+    "keyboard": [
+        [{"text": "Последние"}, {"text": "Поиск"}],
+        [{"text": "Kwork"}, {"text": "Freelance.ru"}],
+    ],
+    "resize_keyboard": True,
+}
+SEARCH_HELP = "Добавь слово после команды. Например: /search Blender"
 
-def orders_reply(query=""):
+
+def format_found_at(value):
     try:
-        response = requests.get(ORDERS_URL, params={"q": query, "limit": 5}, timeout=5)
+        found_at = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return "неизвестно"
+    if found_at.tzinfo is None:
+        return "неизвестно"
+    return found_at.astimezone(MOSCOW).strftime("%d.%m.%Y %H:%M МСК")
+
+def order_card(order):
+    title = order["title"][:200]
+    url = order["url"]
+    if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+        raise ValueError("Некорректная ссылка на заказ")
+    source = order.get("source") or "Неизвестен"
+    budget = order.get("budget") or "не указан"
+    found_at = format_found_at(order.get("found_at"))
+    return {
+        "text": f"{title}\n\nИсточник: {source}\nБюджет: {budget}\nОбнаружено: {found_at}",
+        "reply_markup": {"inline_keyboard": [[{"text": "Открыть заказ", "url": url}]]},
+    }
+
+
+def order_messages(query="", source=""):
+    try:
+        response = requests.get(ORDERS_URL, params={"q": query, "source": source, "limit": 5}, timeout=5)
         response.raise_for_status()
         orders = response.json()
         if not isinstance(orders, list):
             raise ValueError("Ожидался список заказов")
         if not orders:
             if query:
-                return "По этому запросу заказы не найдены."
-            return "Заказов пока нет. Сначала запусти parser.py."
-        lines = []
-        for order in orders[:5]:
-            source = order.get("source") or "Неизвестен"
-            budget = order.get("budget") or "не указан"
-            lines.append(f"{order['title'][:200]}\nИсточник: {source}\nБюджет: {budget}\n{order['url']}")
-        return "\n\n".join(lines)
+                return [{"text": "По этому запросу заказы не найдены."}]
+            if source:
+                return [{"text": "С этой биржи пока нет заказов."}]
+            return [{"text": "Заказов пока нет. Сначала запусти parser.py."}]
+        return [order_card(order) for order in orders[:5]]
     except (requests.RequestException, ValueError, KeyError, TypeError):
-        return "Не удалось получить заказы. Проверь, что api.py запущен."
+        return [{"text": "Не удалось получить заказы. Проверь, что api.py запущен."}]
+
+
+def reply_messages(text):
+    if text == "/start":
+        return [{"text": "Выбери действие в меню.", "reply_markup": MENU}]
+    if text in ("/latest", "Последние"):
+        return order_messages()
+    if text in SOURCE_BUTTONS:
+        return order_messages(source=SOURCE_BUTTONS[text])
+    if text in ("/search", "Поиск"):
+        return [{"text": SEARCH_HELP}]
+    if text.startswith("/search "):
+        query = text[7:].strip()
+        if not query:
+            return [{"text": SEARCH_HELP}]
+        if len(query) > 100:
+            return [{"text": "Запрос слишком длинный. Максимум 100 символов."}]
+        return order_messages(query)
+    return []
 
 def telegram(token, method, data):
     url = f"https://api.telegram.org/bot{token}/{method}"
@@ -61,27 +112,16 @@ def run_bot(token):
             if chat.get("type") != "private":
                 continue
             text = message.get("text", "").strip()
-            if text == "/latest":
-                reply = orders_reply()
-            elif text == "/search" or text.startswith("/search "):
-                query = text[7:].strip()
-                if not query:
-                    reply = "Добавь слово после команды. Например: /search Blender"
-                elif len(query) > 100:
-                    reply = "Запрос слишком длинный. Максимум 100 символов."
-                else:
-                    reply = orders_reply(query)
-            elif text == "/start":
-                reply = "/latest — последние заказы\n/search Blender — поиск по названию"
-            else:
-                continue
-            try:
-                telegram(token, "sendMessage", {
-                    "chat_id": chat["id"], "text": reply,
-                    "link_preview_options": {"is_disabled": True},
-                })
-            except (requests.RequestException, ValueError, KeyError):
-                print("Не удалось отправить ответ в Telegram.")
+            for reply in reply_messages(text):
+                try:
+                    telegram(token, "sendMessage", {
+                        "chat_id": chat["id"], **reply,
+                        "link_preview_options": {"is_disabled": True},
+                    })
+                except (requests.RequestException, ValueError, KeyError):
+                    print("Не удалось отправить ответ в Telegram.")
+                    break
+                sleep(1)
 
 if __name__ == "__main__":
     try:

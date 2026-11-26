@@ -1,11 +1,11 @@
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 DATABASE = Path(__file__).with_name("orders.sqlite3")
 
-def has_budget(connection):
-    columns = connection.execute("PRAGMA table_info(orders)").fetchall()
-    return any(column[1] == "budget" for column in columns)
+def order_columns(connection):
+    return [column[1] for column in connection.execute("PRAGMA table_info(orders)")]
 
 
 def save_orders(orders, database=DATABASE):
@@ -16,18 +16,23 @@ def save_orders(orders, database=DATABASE):
             CREATE TABLE IF NOT EXISTS orders (
                 title TEXT NOT NULL,
                 url TEXT PRIMARY KEY NOT NULL,
-                budget TEXT
+                budget TEXT,
+                found_at TEXT
             )
         """)
-        if not has_budget(connection):
+        columns = order_columns(connection)
+        if "budget" not in columns:
             connection.execute("ALTER TABLE orders ADD COLUMN budget TEXT")
+        if "found_at" not in columns:
+            connection.execute("ALTER TABLE orders ADD COLUMN found_at TEXT")
 
+        found_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         added = 0
         for title, url, budget in orders:
             result = connection.execute("""
-                INSERT INTO orders (title, url, budget) VALUES (?, ?, ?)
+                INSERT INTO orders (title, url, budget, found_at) VALUES (?, ?, ?, ?)
                 ON CONFLICT (url) DO NOTHING
-            """, (title, url, budget))
+            """, (title, url, budget, found_at))
             if result.rowcount:
                 added += 1
             else:
@@ -43,11 +48,13 @@ def read_orders(database=DATABASE):
     address = database.resolve().as_uri() + "?mode=ro"
     connection = sqlite3.connect(address, uri=True)
     try:
-        column = "budget" if has_budget(connection) else "NULL"
-        rows = connection.execute(f"SELECT title, url, {column} FROM orders ORDER BY rowid DESC").fetchall()
+        columns = order_columns(connection)
+        budget_column = "budget" if "budget" in columns else "NULL"
+        time_column = "found_at" if "found_at" in columns else "NULL"
+        rows = connection.execute(f"SELECT title, url, {budget_column}, {time_column} FROM orders ORDER BY rowid DESC").fetchall()
     finally:
         connection.close()
     orders = []
-    for title, url, budget in rows:
-        orders.append({"title": title, "url": url, "budget": budget})
+    for title, url, budget, found_at in rows:
+        orders.append({"title": title, "url": url, "budget": budget, "found_at": found_at})
     return orders
