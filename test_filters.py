@@ -52,7 +52,7 @@ class FilterTests(unittest.TestCase):
 
     def prepare_worker(self):
         self.enterContext(patch("worker.collect_orders", return_value=True))
-        self.enterContext(patch("worker.requests.get", side_effect=lambda url, timeout: Mock(json=lambda: read_orders(self.database))))
+        self.enterContext(patch("worker.requests.get", side_effect=lambda url, timeout, params=None: Mock(json=lambda: read_orders(self.database))))
         self.enterContext(patch("worker.sleep"))
         send = self.enterContext(patch("worker.telegram", return_value={"message_id": 1}))
         save_orders([], self.database)
@@ -83,11 +83,9 @@ class FilterTests(unittest.TestCase):
             ("Python", "https://kwork.ru/projects/1", None),
             ("Python", "https://freelance.ru/task/view/2", None),
         ], self.database)
-
         def change_filter(*args):
             set_notification_filters(42, source="kwork", database=self.database)
             return {"message_id": 1}
-
         send.side_effect = change_filter
         self.assertEqual(worker.run_cycle("0:LOCAL_TEST", 42, self.database), 1)
         self.assertEqual(send.call_count, 1)
@@ -98,9 +96,8 @@ class FilterTests(unittest.TestCase):
         self.assertEqual(notification_urls(42, self.database), {"https://kwork.ru/projects/1", "https://freelance.ru/task/view/2"})
 
     def test_delivery_uses_filters_and_can_send_newly_matching_pending_orders(self):
-        def orders_response(url, timeout):
+        def orders_response(url, timeout, params=None):
             return Mock(json=lambda: read_orders(self.database))
-
         with patch("worker.collect_orders", return_value=True):
             with patch("worker.requests.get", side_effect=orders_response):
                 with patch("worker.telegram", return_value={"message_id": 1}) as send:
@@ -160,6 +157,5 @@ class FilterTests(unittest.TestCase):
         with patch("bot.get_chat_id", return_value=42):
             with patch("bot.requests.post", return_value=Mock(status_code=400, json=lambda: {"detail": "Не больше 10 фраз"})):
                 self.assertEqual(bot.reply_messages("/keywords abc", 42)[0]["text"], "Не больше 10 фраз")
-
 if __name__ == "__main__":
     unittest.main()

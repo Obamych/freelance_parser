@@ -10,6 +10,18 @@ from storage import DATABASE, read_status, save_orders, update_status
 KWORK_URL = "https://kwork.ru/projects"
 FREELANCE_URL = "https://freelance.ru/task"
 
+def plain_text(value):
+    if not isinstance(value, str):
+        return None
+    return " ".join(BeautifulSoup(value, "html.parser").get_text(" ", strip=True).split())[:10000] or None
+
+def publication_date(value, pattern=None):
+    try:
+        date = datetime.strptime(value, pattern) if pattern else datetime.fromisoformat(value)
+        return date.isoformat(timespec="seconds")
+    except (TypeError, ValueError):
+        return None
+
 def kwork_budget(project):
     price = str(project.get("priceLimit", ""))
     if project.get("lang") != "ru" or not re.fullmatch(r"[0-9]{1,12}(\.[0-9]{1,2})?", price):
@@ -17,7 +29,6 @@ def kwork_budget(project):
     rubles, _, coins = price.partition(".")
     if int(rubles) == 0 and not coins.strip("0"):
         return None
-
     amount = f"{int(rubles):,}".replace(",", " ")
     if coins.strip("0"):
         amount += "," + coins.ljust(2, "0")
@@ -41,8 +52,6 @@ def parse_kwork(html):
         for project in projects:
             if not isinstance(project, dict):
                 continue
-            if project.get("isWantArchive") is True or project.get("isWantActive") is False:
-                continue
             title = project.get("name")
             project_id = str(project.get("id", ""))
             if not isinstance(title, str) or not title.strip():
@@ -50,13 +59,14 @@ def parse_kwork(html):
             if not project_id.isascii() or not project_id.isdecimal() or project_id.startswith("0"):
                 continue
             link = f"{KWORK_URL}/{project_id}"
-            orders.append((title.strip(), link, kwork_budget(project)))
+            status = "unknown"
+            if project.get("isWantArchive") is True or project.get("isWantActive") is False:
+                status = "inactive"
+            elif project.get("isWantActive") is True and project.get("isWantArchive") is False:
+                status = "open"
+            orders.append((title.strip(), link, kwork_budget(project), plain_text(project.get("description")), publication_date(project.get("date_create")), status))
         if projects and not orders:
-            inactive = all(isinstance(project, dict) and (
-                project.get("isWantArchive") is True or project.get("isWantActive") is False
-            ) for project in projects)
-            if not inactive:
-                raise ValueError("Не удалось прочитать карточки заказов")
+            raise ValueError("Не удалось прочитать карточки заказов")
         return orders
     raise ValueError("Список заказов не найден")
 
@@ -78,7 +88,10 @@ def parse_freelance(html):
             card = item.find_parent(class_="task-card")
             price = card.select_one(".task-card__budget") if card else None
             budget = " ".join(price.get_text(" ", strip=True).split()) if price else ""
-            orders.append((title, f"{FREELANCE_URL}/view/{task_id}", budget or None))
+            description = card.select_one(".task-card__desc") if card else None
+            published = card.select_one(".task-card__foot-item[title]") if card else None
+            published_at = publication_date(published.get("title"), "%d.%m.%Y %H:%M") if published else None
+            orders.append((title, f"{FREELANCE_URL}/view/{task_id}", budget or None, plain_text(str(description)) if description else None, published_at, "unknown"))
     if not orders:
         raise ValueError("Ссылки на заказы не найдены")
     return orders
@@ -123,7 +136,8 @@ def main(database=DATABASE):
             checked_sources.append(urljoin(url, "/"))
         results[name] = result
     print("Найдено заказов:", len(orders))
-    for title, link, budget in orders:
+    for order in orders:
+        title, link, budget = order[:3]
         print(title)
         print("Бюджет:", budget or "не указан")
         print(link)
@@ -141,6 +155,5 @@ def main(database=DATABASE):
     if added is not None:
         print("Добавлено новых в базу:", added)
     return bool(checked_sources)
-
 if __name__ == "__main__":
     main()

@@ -31,29 +31,37 @@ def save_orders(orders, database=DATABASE, checked_sources=()):
             connection.execute("ALTER TABLE orders ADD COLUMN last_seen TEXT")
         if "is_current" not in columns:
             connection.execute("ALTER TABLE orders ADD COLUMN is_current INTEGER NOT NULL DEFAULT 0")
+        for column in ("description", "published_at", "status"):
+            if column not in columns:
+                connection.execute(f"ALTER TABLE orders ADD COLUMN {column} TEXT")
         found_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         for prefix in checked_sources:
             connection.execute("UPDATE orders SET is_current = 0 WHERE substr(url, 1, length(?)) = ?", (prefix, prefix))
         added = 0
-        for title, url, budget in orders:
+        for order in orders:
+            title, url, budget = order[:3]
+            description = order[3] if len(order) > 3 else None
+            published_at = order[4] if len(order) > 4 else None
+            status = order[5] if len(order) > 5 else "unknown"
             result = connection.execute("""
-                INSERT INTO orders (title, url, budget, found_at, last_seen, is_current)
-                VALUES (?, ?, ?, ?, ?, 1)
+                INSERT INTO orders (title, url, budget, found_at, last_seen, is_current, description, published_at, status)
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
                 ON CONFLICT (url) DO NOTHING
-            """, (title, url, budget, found_at, found_at))
+            """, (title, url, budget, found_at, found_at, description, published_at, status))
             if result.rowcount:
                 added += 1
             else:
                 connection.execute("""
-                    UPDATE orders SET title = ?, budget = ?, last_seen = ?, is_current = 1
+                    UPDATE orders SET title = ?, budget = ?, last_seen = ?, is_current = 1,
+                    description = ?, published_at = ?, status = ?
                     WHERE url = ?
-                """, (title, budget, found_at, url))
+                """, (title, budget, found_at, description, published_at, status, url))
         connection.commit()
         return added
     finally:
         connection.close()
 
-def read_orders(database=DATABASE):
+def read_orders(database=DATABASE, favorite_chat=None):
     if not database.exists():
         return []
     address = database.resolve().as_uri() + "?mode=ro"
@@ -65,17 +73,67 @@ def read_orders(database=DATABASE):
         budget_column = "budget" if "budget" in columns else "NULL"
         time_column = "found_at" if "found_at" in columns else "NULL"
         since = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds")
+        extra_columns = ", ".join(column if column in columns else "NULL" for column in ("description", "published_at", "status"))
+        state = "status" if "status" in columns else "NULL"
+        condition = f"is_current = 1 AND last_seen >= ? AND coalesce({state}, 'unknown') != 'inactive'"
+        parameters = (since,)
+        join = ""
+        sort = "last_seen DESC, orders.rowid DESC"
+        if favorite_chat is not None:
+            if not connection.execute("SELECT name FROM sqlite_master WHERE name = 'favorites' AND type = 'table'").fetchone():
+                return []
+            join = "JOIN favorites ON favorites.url = orders.url"
+            condition = "favorites.chat_id = ?"
+            parameters = (favorite_chat,)
+            sort = "favorites.added_at DESC, orders.rowid DESC"
         rows = connection.execute(f"""
-            SELECT title, url, {budget_column}, {time_column}, last_seen
-            FROM orders WHERE is_current = 1 AND last_seen >= ?
-            ORDER BY last_seen DESC, rowid DESC
-        """, (since,)).fetchall()
+            SELECT orders.rowid, title, orders.url, {budget_column}, {time_column}, last_seen, is_current, {extra_columns}
+            FROM orders {join} WHERE {condition}
+            ORDER BY {sort}
+        """, parameters).fetchall()
     finally:
         connection.close()
     orders = []
-    for title, url, budget, found_at, last_seen in rows:
-        orders.append({"title": title, "url": url, "budget": budget, "found_at": found_at, "last_seen": last_seen})
+    for number, title, url, budget, found_at, last_seen, is_current, description, published_at, status in rows:
+        orders.append({"id": number, "title": title, "url": url, "budget": budget, "found_at": found_at, "last_seen": last_seen, "is_current": bool(is_current), "description": description, "published_at": published_at, "status": status or "unknown"})
     return orders
+
+def favorite_urls(chat_id, database=DATABASE):
+    if not database.exists():
+        return set()
+    connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        if not connection.execute("SELECT name FROM sqlite_master WHERE name = 'favorites' AND type = 'table'").fetchone():
+            return set()
+        return {row[0] for row in connection.execute("SELECT url FROM favorites WHERE chat_id = ?", (chat_id,))}
+    finally:
+        connection.close()
+
+def set_favorite(chat_id, order_id, favorite, database=DATABASE):
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        if not connection.execute("SELECT name FROM sqlite_master WHERE name = 'orders' AND type = 'table'").fetchone():
+            raise ValueError("Заказ не найден")
+        row = connection.execute("SELECT url FROM orders WHERE rowid = ?", (order_id,)).fetchone()
+        if row is None:
+            raise ValueError("Заказ не найден")
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS favorites (
+                chat_id INTEGER NOT NULL,
+                url TEXT NOT NULL,
+                added_at TEXT NOT NULL,
+                PRIMARY KEY (chat_id, url)
+            )
+        """)
+        if favorite:
+            added_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            connection.execute("INSERT INTO favorites VALUES (?, ?, ?) ON CONFLICT DO NOTHING", (chat_id, row[0], added_at))
+        else:
+            connection.execute("DELETE FROM favorites WHERE chat_id = ? AND url = ?", (chat_id, row[0]))
+        connection.commit()
+    finally:
+        connection.close()
 
 def prepare_notifications(chat_id, database=DATABASE):
     connection = sqlite3.connect(database)

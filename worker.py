@@ -37,7 +37,7 @@ def run_cycle(token, chat_id, database=DATABASE):
         print("Уведомления на паузе. Заказы собраны и сохранены.")
         return 0
     worker_status(database, phase="sending")
-    response = requests.get(get_api_url() + "/orders", timeout=10)
+    response = requests.get(get_api_url() + "/orders", params={"chat_id": chat_id}, timeout=10)
     response.raise_for_status()
     orders = response.json()
     if not isinstance(orders, list):
@@ -129,6 +129,5 @@ def main():
             print("\nАвтосбор остановлен.")
         finally:
             worker_status(phase="stopped", next_run=None)
-
 if __name__ == "__main__":
     main()

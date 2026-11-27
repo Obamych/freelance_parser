@@ -19,7 +19,7 @@ class NotificationTests(unittest.TestCase):
         self.enterContext(patch("worker.sleep"))
         self.enterContext(patch("worker.requests.get", side_effect=self.api_response))
 
-    def api_response(self, url, timeout):
+    def api_response(self, url, timeout, params=None):
         return Mock(json=lambda: read_orders(self.database))
 
     def add(self, number):
@@ -114,11 +114,9 @@ class NotificationTests(unittest.TestCase):
         self.cycle()
         first = self.add(2)
         pending = self.add(3)
-
         def send(*args):
             set_notifications_paused(self.chat_id, True, self.database)
             return {"message_id": 1}
-
         self.send.side_effect = send
         self.assertEqual(self.cycle(), 1)
         self.assertIn(first, notification_urls(self.chat_id, self.database))

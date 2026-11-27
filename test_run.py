@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 import requests
 import run
-from storage import notifications_paused, update_status
+from storage import notifications_paused, save_orders, update_status
 
 class RunTests(unittest.TestCase):
     def setUp(self):
@@ -62,19 +62,17 @@ class RunTests(unittest.TestCase):
         self.enterContext(patch.dict(os.environ, {"API_PORT": str(port), "TELEGRAM_CHAT_ID": "42"}))
         self.enterContext(patch("run.PROJECT", directory))
         original = run.start_process
-
         def start(filename):
             process = original(filename)
             self.processes.append((filename, process))
             return process
-
         self.enterContext(patch("run.start_process", side_effect=start))
         return directory
 
     def test_real_api_starts_before_clients_and_interrupt_stops_all(self):
         directory = self.make_project()
         update_status("worker", {"phase": "waiting", "sent": 3}, directory / "orders.sqlite3")
-
+        save_orders([("Python", "https://kwork.ru/projects/1", "500 ₽", "Написать скрипт", "2026-11-27T12:00:00", "open")], directory / "orders.sqlite3")
         def interrupt(processes):
             self.assertEqual([name for name, process in processes], ["API", "Бот", "Автосбор"])
             self.assertTrue(all(process.poll() is None for name, process in processes))
@@ -94,6 +92,20 @@ class RunTests(unittest.TestCase):
                 missing = session.post(run.get_api_url() + "/notification-filters/42", timeout=2)
                 unchanged = session.get(run.get_api_url() + "/notifications/42", timeout=2).json()
                 clear = session.post(run.get_api_url() + "/notification-filters/42", params={"keywords": ""}, timeout=2)
+                order = session.get(run.get_api_url() + "/orders", params={"chat_id": 42}, timeout=2).json()[0]
+                favorite_url = run.get_api_url() + f"/favorites/42/{order['id']}"
+                session.post(favorite_url, params={"favorite": True}, timeout=2).raise_for_status()
+                session.post(favorite_url, params={"favorite": True}, timeout=2).raise_for_status()
+                saved = session.get(run.get_api_url() + "/favorites/42", timeout=2).json()
+                other = session.get(run.get_api_url() + "/favorites/43", timeout=2).json()
+                favorite_feed = session.get(run.get_api_url() + "/orders", params={"chat_id": 42}, timeout=2).json()
+                save_orders([], directory / "orders.sqlite3", checked_sources=["https://kwork.ru/"])
+                absent_feed = session.get(run.get_api_url() + "/orders", timeout=2).json()
+                absent_saved = session.get(run.get_api_url() + "/favorites/42", timeout=2).json()
+                missing_order = session.post(run.get_api_url() + "/favorites/42/999", params={"favorite": True}, timeout=2)
+                session.post(favorite_url, params={"favorite": False}, timeout=2).raise_for_status()
+                session.post(favorite_url, params={"favorite": False}, timeout=2).raise_for_status()
+                removed = session.get(run.get_api_url() + "/favorites/42", timeout=2).json()
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["worker"]["sent"], 3)
             self.assertEqual(paused.status_code, 200)
@@ -110,8 +122,17 @@ class RunTests(unittest.TestCase):
             self.assertEqual(missing.status_code, 400)
             self.assertEqual(unchanged, stored)
             self.assertEqual(clear.json(), {"paused": True, "source": "kwork", "keywords": ""})
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(saved[0]["description"], "Написать скрипт")
+            self.assertEqual(saved[0]["published_at"], "2026-11-27T12:00:00")
+            self.assertTrue(saved[0]["is_favorite"])
+            self.assertEqual(other, [])
+            self.assertTrue(favorite_feed[0]["is_favorite"])
+            self.assertEqual(absent_feed, [])
+            self.assertFalse(absent_saved[0]["is_current"])
+            self.assertEqual(missing_order.status_code, 404)
+            self.assertEqual(removed, [])
             raise KeyboardInterrupt
-
         with patch("run.watch_processes", side_effect=interrupt):
             self.assertEqual(run.main(), 0)
         self.assertEqual(len(self.processes), 3)
@@ -131,6 +152,5 @@ class RunTests(unittest.TestCase):
         self.assertEqual(len(self.processes), 3)
         self.assertTrue(all(process.poll() is not None for name, process in self.processes))
         self.assertIn("Бот завершился (код 9)", self.output.getvalue())
-
 if __name__ == "__main__":
     unittest.main()

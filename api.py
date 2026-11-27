@@ -5,13 +5,19 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from config import API_HOST, get_api_port, get_chat_id
-from storage import get_notification_settings, read_orders, read_status, set_notification_filters, set_notifications_paused
+from storage import favorite_urls, get_notification_settings, read_orders, read_status, set_favorite, set_notification_filters, set_notifications_paused
 
 app = FastAPI()
 SOURCES = {
     "kwork": ("https://kwork.ru/", "Kwork"),
     "freelance": ("https://freelance.ru/", "Freelance.ru"),
 }
+
+def source_name(order):
+    for prefix, label in SOURCES.values():
+        if order["url"].startswith(prefix):
+            return {**order, "source": label}
+    return {**order, "source": "Неизвестен"}
 
 def find_orders(q, source):
     try:
@@ -25,12 +31,7 @@ def find_orders(q, source):
             continue
         if source and not order["url"].startswith(SOURCES[source][0]):
             continue
-        name = "Неизвестен"
-        for prefix, label in SOURCES.values():
-            if order["url"].startswith(prefix):
-                name = label
-                break
-        found.append({**order, "source": name})
+        found.append(source_name(order))
     return found
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -144,9 +145,37 @@ def get_orders(
     q: str = Query(default="", max_length=100),
     source: Literal["", "kwork", "freelance"] = "",
     limit: int | None = Query(default=None, ge=1, le=100),
+    chat_id: int | None = Query(default=None, gt=0),
 ):
     orders = find_orders(q, source)
+    if chat_id is not None:
+        try:
+            saved = favorite_urls(chat_id)
+        except sqlite3.Error:
+            raise HTTPException(status_code=503, detail="Не удалось прочитать избранное") from None
+        orders = [{**order, "is_favorite": order["url"] in saved} for order in orders]
     return orders if limit is None else orders[:limit]
+
+@app.get("/favorites/{chat_id}")
+def list_favorites(chat_id: int):
+    if chat_id <= 0:
+        raise HTTPException(status_code=400, detail="Некорректный номер чата")
+    try:
+        return [{**source_name(order), "is_favorite": True} for order in read_orders(favorite_chat=chat_id)]
+    except sqlite3.Error:
+        raise HTTPException(status_code=503, detail="Не удалось прочитать избранное") from None
+
+@app.post("/favorites/{chat_id}/{order_id}")
+def change_favorite(chat_id: int, order_id: int, favorite: bool = Query(...)):
+    if chat_id <= 0 or order_id <= 0:
+        raise HTTPException(status_code=400, detail="Некорректный номер чата или заказа")
+    try:
+        set_favorite(chat_id, order_id, favorite)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Заказ не найден") from None
+    except sqlite3.Error:
+        raise HTTPException(status_code=503, detail="Не удалось сохранить избранное") from None
+    return {"favorite": favorite}
 if __name__ == "__main__":
     try:
         port = get_api_port()
