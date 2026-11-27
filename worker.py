@@ -7,7 +7,14 @@ import requests
 from bot import format_found_at, order_card, telegram
 from config import get_api_url, get_bot_token, get_chat_id, get_collect_interval
 from parser import main as collect_orders
-from storage import DATABASE, mark_notified, notification_urls, prepare_notifications, update_status
+from storage import DATABASE, get_notification_settings, mark_notified, notification_urls, notifications_paused, prepare_notifications, update_status
+
+def matches_notifications(order, settings):
+    prefixes = {"kwork": "https://kwork.ru/", "freelance": "https://freelance.ru/"}
+    if settings["source"] != "all" and not order["url"].startswith(prefixes[settings["source"]]):
+        return False
+    words = [word.strip().casefold() for word in settings["keywords"].split(",") if word.strip()]
+    return not words or any(word in order["title"].casefold() for word in words)
 
 def worker_status(database=DATABASE, **values):
     try:
@@ -25,6 +32,10 @@ def run_cycle(token, chat_id, database=DATABASE):
         print("Начальный список сохранён. Уведомления начнутся с новых заказов.")
         worker_status(database, phase="finished")
         return 0
+    if notifications_paused(chat_id, database):
+        worker_status(database, phase="paused")
+        print("Уведомления на паузе. Заказы собраны и сохранены.")
+        return 0
     worker_status(database, phase="sending")
     response = requests.get(get_api_url() + "/orders", timeout=10)
     response.raise_for_status()
@@ -36,6 +47,13 @@ def run_cycle(token, chat_id, database=DATABASE):
     for order in reversed(orders):
         url = order["url"]
         if url in processed:
+            continue
+        settings = get_notification_settings(chat_id, database)
+        if settings["paused"]:
+            worker_status(database, phase="paused")
+            print("Рассылка приостановлена. Отправлено в этом цикле:", sent)
+            return sent
+        if not matches_notifications(order, settings):
             continue
         telegram(token, "sendMessage", {
             "chat_id": chat_id, **order_card(order),

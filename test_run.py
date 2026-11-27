@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 import requests
 import run
-from storage import update_status
+from storage import notifications_paused, update_status
 
 class RunTests(unittest.TestCase):
     def setUp(self):
@@ -59,7 +59,7 @@ class RunTests(unittest.TestCase):
             connection.bind(("127.0.0.1", 0))
             port = connection.getsockname()[1]
         self.use_port(port)
-        self.enterContext(patch.dict(os.environ, {"API_PORT": str(port)}))
+        self.enterContext(patch.dict(os.environ, {"API_PORT": str(port), "TELEGRAM_CHAT_ID": "42"}))
         self.enterContext(patch("run.PROJECT", directory))
         original = run.start_process
 
@@ -81,8 +81,35 @@ class RunTests(unittest.TestCase):
             with requests.Session() as session:
                 session.trust_env = False
                 response = session.get(run.get_api_url() + "/status", timeout=2)
+                paused = session.post(run.get_api_url() + "/notifications/42", params={"paused": True}, timeout=2)
+                forbidden = session.post(run.get_api_url() + "/notifications/43", params={"paused": False}, timeout=2)
+                invalid = session.post(run.get_api_url() + "/notifications/42", params={"paused": "wrong"}, timeout=2)
+                status = session.get(run.get_api_url() + "/status", timeout=2).json()
+                filters = session.post(run.get_api_url() + "/notification-filters/42", params={"source": "kwork", "keywords": "Python, BLENDER, python"}, timeout=2)
+                stored = session.get(run.get_api_url() + "/notifications/42", timeout=2).json()
+                bad_source = session.post(run.get_api_url() + "/notification-filters/42", params={"source": "unknown"}, timeout=2)
+                too_many = session.post(run.get_api_url() + "/notification-filters/42", params={"keywords": ",".join(str(n) for n in range(11))}, timeout=2)
+                empty_words = session.post(run.get_api_url() + "/notification-filters/42", params={"keywords": ", , "}, timeout=2)
+                too_long = session.post(run.get_api_url() + "/notification-filters/42", params={"keywords": "x" * 301}, timeout=2)
+                missing = session.post(run.get_api_url() + "/notification-filters/42", timeout=2)
+                unchanged = session.get(run.get_api_url() + "/notifications/42", timeout=2).json()
+                clear = session.post(run.get_api_url() + "/notification-filters/42", params={"keywords": ""}, timeout=2)
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["worker"]["sent"], 3)
+            self.assertEqual(paused.status_code, 200)
+            self.assertEqual(forbidden.status_code, 403)
+            self.assertEqual(invalid.status_code, 422)
+            self.assertTrue(status["notifications"]["paused"])
+            self.assertTrue(notifications_paused(42, directory / "orders.sqlite3"))
+            self.assertEqual(filters.status_code, 200)
+            self.assertEqual(stored, {"paused": True, "source": "kwork", "keywords": "Python, BLENDER"})
+            self.assertEqual(bad_source.status_code, 422)
+            self.assertEqual(too_many.status_code, 400)
+            self.assertEqual(empty_words.status_code, 400)
+            self.assertEqual(too_long.status_code, 422)
+            self.assertEqual(missing.status_code, 400)
+            self.assertEqual(unchanged, stored)
+            self.assertEqual(clear.json(), {"paused": True, "source": "kwork", "keywords": ""})
             raise KeyboardInterrupt
 
         with patch("run.watch_processes", side_effect=interrupt):

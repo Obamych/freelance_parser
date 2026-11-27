@@ -4,19 +4,31 @@ from datetime import datetime, timedelta, timezone
 from getpass import getpass
 from time import sleep
 import requests
-from config import get_api_url, get_bot_token
+from config import get_api_url, get_bot_token, get_chat_id
 
 MOSCOW = timezone(timedelta(hours=3))
 SOURCE_BUTTONS = {"Kwork": "kwork", "Freelance.ru": "freelance"}
+NOTIFICATION_SOURCES = {"Только Kwork": "kwork", "Только Freelance.ru": "freelance", "Обе биржи": "all"}
+SOURCE_NAMES = {"all": "обе биржи", "kwork": "Kwork", "freelance": "Freelance.ru"}
 MENU = {
     "keyboard": [
         [{"text": "Последние"}, {"text": "Поиск"}],
         [{"text": "Kwork"}, {"text": "Freelance.ru"}],
-        [{"text": "Статус"}],
+        [{"text": "Статус"}, {"text": "Настройки"}],
+        [{"text": "Пауза"}, {"text": "Возобновить"}],
+    ],
+    "resize_keyboard": True,
+}
+SETTINGS_MENU = {
+    "keyboard": [
+        [{"text": "Только Kwork"}, {"text": "Только Freelance.ru"}],
+        [{"text": "Обе биржи"}, {"text": "Ключевые слова"}],
+        [{"text": "Сбросить слова"}, {"text": "Назад"}],
     ],
     "resize_keyboard": True,
 }
 SEARCH_HELP = "Добавь слово после команды. Например: /search Blender"
+KEYWORDS_HELP = "Напиши /keywords Blender, Python. Совпадение хотя бы одного слова или фразы ищется в названии, регистр не важен. До 10 фраз, не больше 300 символов. Для очистки нажми «Сбросить слова» или отправь /keywords_clear."
 
 def format_found_at(value):
     try:
@@ -65,9 +77,17 @@ def status_message():
         data = response.json()
         collection = data.get("collection", {})
         worker = data.get("worker", {})
-        if not collection and not worker:
-            return {"text": "Данных о сборе пока нет. Они появятся после запуска автосбора."}
+        notifications = data.get("notifications", {})
         lines = ["Состояние сбора"]
+        if "paused" in notifications:
+            state = "на паузе, сбор продолжается" if notifications["paused"] else "включены"
+            lines.append("Уведомления: " + state)
+        if "source" in notifications:
+            lines.append("Биржи для уведомлений: " + SOURCE_NAMES[notifications["source"]])
+            lines.append("Ключевые слова: " + (notifications.get("keywords") or "любые"))
+        if not collection and not worker:
+            lines.append("Данных о сборе пока нет. Они появятся после запуска автосбора.")
+            return {"text": "\n".join(lines)}
         if collection:
             lines.append("Последний итог: " + format_found_at(collection.get("updated_at")))
             for name, source in collection.get("sources", {}).items():
@@ -84,6 +104,7 @@ def status_message():
                 "collecting": "идёт сбор", "sending": "отправка уведомлений",
                 "finished": "цикл завершён", "waiting": "ожидание следующего сбора",
                 "error": "ошибка", "stopped": "остановлен",
+                "paused": "рассылка приостановлена",
             }
             lines.append("\nПоследняя запись автосбора: " + phases.get(worker.get("phase"), "неизвестно"))
             lines.append("Обновлено: " + format_found_at(worker.get("updated_at")))
@@ -98,13 +119,84 @@ def status_message():
     except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError):
         return {"text": "Не удалось получить состояние сбора. Проверь, что api.py запущен."}
 
-def reply_messages(text):
+def notification_reply(chat_id, paused):
+    try:
+        if chat_id != get_chat_id():
+            return {"text": "Управлять уведомлениями можно только из чата, указанного в TELEGRAM_CHAT_ID."}
+        response = requests.post(
+            get_api_url() + f"/notifications/{chat_id}", params={"paused": paused}, timeout=5,
+        )
+        response.raise_for_status()
+        if response.json().get("paused") is not paused:
+            raise ValueError("API не подтвердил настройку")
+    except (requests.RequestException, ValueError, AttributeError):
+        return {"text": "Не удалось изменить уведомления. Проверь API и TELEGRAM_CHAT_ID в .env."}
+    if paused:
+        text = "Уведомления на паузе. Сбор заказов продолжается. Для включения нажми «Возобновить»."
+    else:
+        text = "Уведомления включены. В следующем цикле пришлю неприсланные заказы из свежей выдачи."
+    return {"text": text, "reply_markup": MENU}
+
+def settings_reply(chat_id, **changes):
+    try:
+        if chat_id != get_chat_id():
+            return {"text": "Настройки доступны в чате, указанном в TELEGRAM_CHAT_ID."}
+        if changes:
+            response = requests.post(get_api_url() + f"/notification-filters/{chat_id}", params=changes, timeout=5)
+        else:
+            response = requests.get(get_api_url() + f"/notifications/{chat_id}", timeout=5)
+        if response.status_code == 400:
+            detail = response.json().get("detail")
+            if isinstance(detail, str):
+                return {"text": detail, "reply_markup": SETTINGS_MENU}
+        response.raise_for_status()
+        settings = response.json()
+        state = "на паузе" if settings["paused"] else "включены"
+        text = (
+            f"Настройки уведомлений\nУведомления: {state}\n"
+            f"Биржи: {SOURCE_NAMES[settings['source']]}\n"
+            f"Ключевые слова: {settings['keywords'] or 'любые'}\n\n"
+            "Выбери биржу кнопкой или нажми «Ключевые слова». "
+            "Фильтры применяются к автоматическим уведомлениям. "
+            "При включённых уведомлениях подходящие неприсланные заказы будут отправлены в цикле сбора."
+        )
+        return {"text": text, "reply_markup": SETTINGS_MENU}
+    except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError):
+        return {"text": "Не удалось получить или сохранить настройки. Проверь API и TELEGRAM_CHAT_ID в .env."}
+
+def reply_messages(text, chat_id=None):
     if text == "/start":
         return [{"text": "Выбери действие в меню.", "reply_markup": MENU}]
     if text in ("/latest", "Последние"):
         return order_messages()
     if text in ("/status", "Статус"):
         return [status_message()]
+    if text in ("/pause", "Пауза"):
+        return [notification_reply(chat_id, True)]
+    if text in ("/resume", "Возобновить"):
+        return [notification_reply(chat_id, False)]
+    if text in ("/settings", "/sources", "Настройки"):
+        return [settings_reply(chat_id)]
+    if text in NOTIFICATION_SOURCES:
+        return [settings_reply(chat_id, source=NOTIFICATION_SOURCES[text])]
+    if text.startswith("/sources "):
+        source = text[9:].strip().casefold()
+        if source not in SOURCE_NAMES:
+            return [{"text": "Выбери биржу в настройках или напиши /sources all, /sources kwork, /sources freelance."}]
+        return [settings_reply(chat_id, source=source)]
+    if text in ("/keywords", "Ключевые слова"):
+        return [{"text": KEYWORDS_HELP}]
+    if text in ("/keywords_clear", "Сбросить слова"):
+        return [settings_reply(chat_id, keywords="")]
+    if text.startswith("/keywords "):
+        keywords = text[10:].strip()
+        if not keywords:
+            return [{"text": KEYWORDS_HELP}]
+        if len(keywords) > 300:
+            return [{"text": "Для ключевых слов доступно не больше 300 символов."}]
+        return [settings_reply(chat_id, keywords=keywords)]
+    if text == "Назад":
+        return [{"text": "Главное меню.", "reply_markup": MENU}]
     if text in SOURCE_BUTTONS:
         return order_messages(source=SOURCE_BUTTONS[text])
     if text in ("/search", "Поиск"):
@@ -159,7 +251,7 @@ def run_bot(token):
             if text == "/id":
                 replies = [{"text": f"Твой номер чата: {chat['id']}"}]
             else:
-                replies = reply_messages(text)
+                replies = reply_messages(text, chat["id"])
             for reply in replies:
                 try:
                     telegram(token, "sendMessage", {
@@ -181,11 +273,11 @@ if __name__ == "__main__":
             else:
                 token = sys.stdin.readline().strip()
         if re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", token):
-            print("Бот запущен. Команды: /latest, /search и /status.")
+            print("Бот запущен. Команды: /latest, /search, /status, /settings, /pause, /resume.")
             run_bot(token)
         else:
             print("Укажи токен от BotFather в BOT_TOKEN в файле .env.")
     except ValueError as error:
         print(error)
     except KeyboardInterrupt:
-        print("\nБот остановлен.")
+        print("\nБот остановлен.")  

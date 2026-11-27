@@ -114,6 +114,85 @@ def mark_notified(chat_id, url, database=DATABASE):
     finally:
         connection.close()
 
+def get_notification_settings(chat_id, database=DATABASE):
+    settings = {"paused": False, "source": "all", "keywords": ""}
+    if not database.exists():
+        return settings
+    connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        table = connection.execute("SELECT name FROM sqlite_master WHERE name = 'notification_settings' AND type = 'table'").fetchone()
+        if not table:
+            return settings
+        columns = [column[1] for column in connection.execute("PRAGMA table_info(notification_settings)")]
+        source = "source" if "source" in columns else "'all'"
+        keywords = "keywords" if "keywords" in columns else "''"
+        row = connection.execute(f"SELECT paused, {source}, {keywords} FROM notification_settings WHERE chat_id = ?", (chat_id,)).fetchone()
+        if row:
+            settings = {"paused": bool(row[0]), "source": row[1], "keywords": row[2]}
+        return settings
+    finally:
+        connection.close()
+
+def notifications_paused(chat_id, database=DATABASE):
+    return get_notification_settings(chat_id, database)["paused"]
+
+def create_notification_settings(connection):
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS notification_settings (
+            chat_id INTEGER PRIMARY KEY,
+            paused INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'all',
+            keywords TEXT NOT NULL DEFAULT ''
+        )
+    """)
+    columns = [column[1] for column in connection.execute("PRAGMA table_info(notification_settings)")]
+    if "source" not in columns:
+        connection.execute("ALTER TABLE notification_settings ADD COLUMN source TEXT NOT NULL DEFAULT 'all'")
+    if "keywords" not in columns:
+        connection.execute("ALTER TABLE notification_settings ADD COLUMN keywords TEXT NOT NULL DEFAULT ''")
+
+def set_notifications_paused(chat_id, paused, database=DATABASE):
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        create_notification_settings(connection)
+        connection.execute("""
+            INSERT INTO notification_settings (chat_id, paused) VALUES (?, ?)
+            ON CONFLICT (chat_id) DO UPDATE SET paused = excluded.paused
+        """, (chat_id, paused))
+        connection.commit()
+    finally:
+        connection.close()
+
+def set_notification_filters(chat_id, source=None, keywords=None, database=DATABASE):
+    if source is not None and source not in ("all", "kwork", "freelance"):
+        raise ValueError("Выбери Kwork, Freelance.ru или обе биржи.")
+    if keywords is not None:
+        if len(keywords) > 300:
+            raise ValueError("Для ключевых слов доступно не больше 300 символов.")
+        words = []
+        for word in keywords.split(","):
+            word = " ".join(word.split())
+            if word and word.casefold() not in [value.casefold() for value in words]:
+                words.append(word)
+        if keywords and not words:
+            raise ValueError("Укажи хотя бы одно слово или фразу. Для очистки используй /keywords_clear.")
+        if len(words) > 10:
+            raise ValueError("Укажи не больше 10 слов или фраз через запятую.")
+        keywords = ", ".join(words)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        create_notification_settings(connection)
+        connection.execute("INSERT INTO notification_settings (chat_id) VALUES (?) ON CONFLICT DO NOTHING", (chat_id,))
+        if source is not None:
+            connection.execute("UPDATE notification_settings SET source = ? WHERE chat_id = ?", (source, chat_id))
+        if keywords is not None:
+            connection.execute("UPDATE notification_settings SET keywords = ? WHERE chat_id = ?", (keywords, chat_id))
+        connection.commit()
+    finally:
+        connection.close()
+
 def update_status(name, values, database=DATABASE):
     connection = sqlite3.connect(database)
     try:

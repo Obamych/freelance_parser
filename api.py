@@ -4,8 +4,8 @@ from typing import Literal
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
-from config import API_HOST, get_api_port
-from storage import read_orders, read_status
+from config import API_HOST, get_api_port, get_chat_id
+from storage import get_notification_settings, read_orders, read_status, set_notification_filters, set_notifications_paused
 
 app = FastAPI()
 SOURCES = {
@@ -50,7 +50,6 @@ def home(q: str = Query(default="", max_length=100), source: Literal["", "kwork"
         content = "<p>По этим условиям заказы не найдены.</p>"
     else:
         content = "<p>Свежих заказов пока нет. Запусти parser.py, чтобы обновить список.</p>"
-
     kwork_selected = "selected" if source == "kwork" else ""
     freelance_selected = "selected" if source == "freelance" else ""
     return f"""<!doctype html>
@@ -88,9 +87,57 @@ def home(q: str = Query(default="", max_length=100), source: Literal["", "kwork"
 @app.get("/status")
 def get_status():
     try:
-        return read_status()
+        status = read_status()
+        try:
+            chat_id = get_chat_id()
+        except ValueError:
+            return status
+        status["notifications"] = get_notification_settings(chat_id)
+        return status
     except (sqlite3.Error, ValueError):
         raise HTTPException(status_code=503, detail="Не удалось прочитать состояние сбора") from None
+
+def check_notification_owner(chat_id):
+    try:
+        owner = get_chat_id()
+    except ValueError:
+        raise HTTPException(status_code=503, detail="Не настроен чат для уведомлений") from None
+    if chat_id != owner:
+        raise HTTPException(status_code=403, detail="Управление доступно в настроенном чате")
+
+@app.get("/notifications/{chat_id}")
+def notification_settings(chat_id: int):
+    check_notification_owner(chat_id)
+    try:
+        return get_notification_settings(chat_id)
+    except sqlite3.Error:
+        raise HTTPException(status_code=503, detail="Не удалось прочитать настройки") from None
+
+@app.post("/notification-filters/{chat_id}")
+def change_notification_filters(
+    chat_id: int,
+    source: Literal["all", "kwork", "freelance"] | None = Query(default=None),
+    keywords: str | None = Query(default=None, max_length=300),
+):
+    check_notification_owner(chat_id)
+    if source is None and keywords is None:
+        raise HTTPException(status_code=400, detail="Укажи биржу или ключевые слова")
+    try:
+        set_notification_filters(chat_id, source, keywords)
+        return get_notification_settings(chat_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+    except sqlite3.Error:
+        raise HTTPException(status_code=503, detail="Не удалось сохранить фильтры") from None
+
+@app.post("/notifications/{chat_id}")
+def change_notifications(chat_id: int, paused: bool = Query(...)):
+    check_notification_owner(chat_id)
+    try:
+        set_notifications_paused(chat_id, paused)
+    except sqlite3.Error:
+        raise HTTPException(status_code=503, detail="Не удалось сохранить настройку уведомлений") from None
+    return {"paused": paused}
 
 @app.get("/orders")
 def get_orders(

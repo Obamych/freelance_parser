@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 import requests
 import worker
-from storage import notification_urls, read_orders, read_status, save_orders
+from storage import notification_urls, notifications_paused, read_orders, read_status, save_orders, set_notifications_paused
 
 class NotificationTests(unittest.TestCase):
     def setUp(self):
@@ -91,3 +91,46 @@ class NotificationTests(unittest.TestCase):
         save_orders([], self.database, checked_sources=["https://kwork.ru/"])
         self.assertEqual(self.cycle(), 0)
         self.send.assert_not_called()
+
+    def test_pause_keeps_collecting_and_resume_sends_pending_once(self):
+        self.add(1)
+        self.cycle()
+        set_notifications_paused(self.chat_id, True, self.database)
+        self.collect.side_effect = lambda database: bool(self.add(2))
+        self.assertEqual(self.cycle(), 0)
+        self.assertTrue(notifications_paused(self.chat_id, self.database))
+        self.assertEqual(len(read_orders(self.database)), 2)
+        self.assertEqual(len(notification_urls(self.chat_id, self.database)), 1)
+        self.assertEqual(read_status(self.database)["worker"]["phase"], "paused")
+        self.send.assert_not_called()
+        set_notifications_paused(self.chat_id, False, self.database)
+        self.collect.side_effect = None
+        self.assertEqual(self.cycle(), 1)
+        self.assertEqual(self.cycle(), 0)
+        self.assertEqual(self.send.call_count, 1)
+
+    def test_pause_during_delivery_stops_before_next_card(self):
+        self.add(1)
+        self.cycle()
+        first = self.add(2)
+        pending = self.add(3)
+
+        def send(*args):
+            set_notifications_paused(self.chat_id, True, self.database)
+            return {"message_id": 1}
+
+        self.send.side_effect = send
+        self.assertEqual(self.cycle(), 1)
+        self.assertIn(first, notification_urls(self.chat_id, self.database))
+        self.assertNotIn(pending, notification_urls(self.chat_id, self.database))
+        self.assertEqual(self.send.call_count, 1)
+        self.assertEqual(read_status(self.database)["worker"]["phase"], "paused")
+        set_notifications_paused(self.chat_id, False, self.database)
+        self.send.reset_mock(side_effect=True)
+        self.assertEqual(self.cycle(), 1)
+        self.assertEqual(self.send.call_count, 1)
+
+    def test_pause_is_separate_for_each_chat(self):
+        set_notifications_paused(self.chat_id, True, self.database)
+        self.assertTrue(notifications_paused(self.chat_id, self.database))
+        self.assertFalse(notifications_paused(43, self.database))
