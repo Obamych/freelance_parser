@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,7 +31,6 @@ def save_orders(orders, database=DATABASE, checked_sources=()):
             connection.execute("ALTER TABLE orders ADD COLUMN last_seen TEXT")
         if "is_current" not in columns:
             connection.execute("ALTER TABLE orders ADD COLUMN is_current INTEGER NOT NULL DEFAULT 0")
-
         found_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         for prefix in checked_sources:
             connection.execute("UPDATE orders SET is_current = 0 WHERE substr(url, 1, length(?)) = ?", (prefix, prefix))
@@ -111,5 +111,34 @@ def mark_notified(chat_id, url, database=DATABASE):
     try:
         connection.execute("INSERT INTO notifications VALUES (?, ?) ON CONFLICT DO NOTHING", (chat_id, url))
         connection.commit()
+    finally:
+        connection.close()
+
+def update_status(name, values, database=DATABASE):
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("CREATE TABLE IF NOT EXISTS app_status (name TEXT PRIMARY KEY, data TEXT NOT NULL)")
+        row = connection.execute("SELECT data FROM app_status WHERE name = ?", (name,)).fetchone()
+        data = json.loads(row[0]) if row else {}
+        data.update(values)
+        data["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        connection.execute("""
+            INSERT INTO app_status VALUES (?, ?)
+            ON CONFLICT (name) DO UPDATE SET data = excluded.data
+        """, (name, json.dumps(data, ensure_ascii=False)))
+        connection.commit()
+    finally:
+        connection.close()
+
+def read_status(database=DATABASE):
+    if not database.exists():
+        return {}
+    connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        table = connection.execute("SELECT name FROM sqlite_master WHERE name = 'app_status' AND type = 'table'").fetchone()
+        if not table:
+            return {}
+        return {name: json.loads(data) for name, data in connection.execute("SELECT name, data FROM app_status")}
     finally:
         connection.close()

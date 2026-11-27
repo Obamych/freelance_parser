@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 import requests
 import worker
-from storage import notification_urls, read_orders, save_orders
+from storage import notification_urls, read_orders, read_status, save_orders
 
 class NotificationTests(unittest.TestCase):
     def setUp(self):
@@ -45,8 +45,10 @@ class NotificationTests(unittest.TestCase):
         card = self.send.call_args.args[2]
         self.assertEqual(card["chat_id"], self.chat_id)
         self.assertEqual(card["reply_markup"]["inline_keyboard"][0][0]["url"], new_url)
+        self.assertEqual(read_status(self.database)["worker"]["sent"], 1)
         self.assertEqual(self.cycle(), 0)
         self.assertEqual(self.send.call_count, 1)
+        self.assertEqual(read_status(self.database)["worker"]["sent"], 0)
 
     def test_failed_send_is_retried_without_resending_confirmed_cards(self):
         self.add(1)
@@ -59,6 +61,7 @@ class NotificationTests(unittest.TestCase):
         marks = notification_urls(self.chat_id, self.database)
         self.assertIn(confirmed, marks)
         self.assertNotIn(pending, marks)
+        self.assertEqual(read_status(self.database)["worker"]["sent"], 1)
         self.send.reset_mock(side_effect=True)
         self.assertEqual(self.cycle(), 1)
         self.assertEqual(self.send.call_count, 1)

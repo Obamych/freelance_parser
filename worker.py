@@ -1,20 +1,31 @@
 import os
 import re
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from time import monotonic, sleep
 import requests
-from bot import order_card, telegram
+from bot import format_found_at, order_card, telegram
 from config import get_api_url, get_bot_token, get_chat_id, get_collect_interval
 from parser import main as collect_orders
-from storage import DATABASE, mark_notified, notification_urls, prepare_notifications
+from storage import DATABASE, mark_notified, notification_urls, prepare_notifications, update_status
+
+def worker_status(database=DATABASE, **values):
+    try:
+        update_status("worker", values, database)
+    except (sqlite3.Error, ValueError):
+        print("Не удалось сохранить состояние автосбора.")
 
 def run_cycle(token, chat_id, database=DATABASE):
+    worker_status(database, phase="collecting", sent=0, error=None, next_run=None)
     if not collect_orders(database):
         print("Сбор не удался. Отправка отложена до следующего цикла.")
+        worker_status(database, phase="error", error="Не удалось собрать и сохранить заказы.")
         return 0
     if prepare_notifications(chat_id, database):
         print("Начальный список сохранён. Уведомления начнутся с новых заказов.")
+        worker_status(database, phase="finished")
         return 0
+    worker_status(database, phase="sending")
     response = requests.get(get_api_url() + "/orders", timeout=10)
     response.raise_for_status()
     orders = response.json()
@@ -33,8 +44,10 @@ def run_cycle(token, chat_id, database=DATABASE):
         mark_notified(chat_id, url, database)
         processed.add(url)
         sent += 1
+        worker_status(database, sent=sent)
         sleep(1)
     print("Отправлено новых заказов:", sent)
+    worker_status(database, phase="finished")
     return sent
 
 def run_worker(token, chat_id, minutes):
@@ -45,16 +58,24 @@ def run_worker(token, chat_id, minutes):
         except requests.HTTPError as error:
             code = error.response.status_code
             print(f"Ошибка HTTP {code}. Проверь API и доступ бота к чату.")
+            worker_status(phase="error", error=f"Ошибка HTTP {code} при получении или отправке заказов.")
             if code in (401, 403, 404):
+                worker_status(phase="stopped", next_run=None)
                 return
         except requests.RequestException:
             print("Ошибка соединения. Повтор в следующем цикле.")
+            worker_status(phase="error", error="Ошибка соединения с API или Telegram.")
         except sqlite3.Error:
             print("Ошибка SQLite. Проверь доступ к базе и место на диске.")
+            worker_status(phase="error", error="Ошибка SQLite. Проверь доступ к базе и место на диске.")
         except (ValueError, KeyError, TypeError):
             print("Не удалось обработать данные. Проверь ответы API.")
-        print(f"Следующий сбор через {minutes} минут.", flush=True)
-        sleep(max(0, minutes * 60 - (monotonic() - started)))
+            worker_status(phase="error", error="Не удалось обработать ответ API или Telegram.")
+        delay = max(0, minutes * 60 - (monotonic() - started))
+        next_run = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat(timespec="seconds")
+        worker_status(phase="waiting", next_run=next_run)
+        print("Следующий сбор:", format_found_at(next_run), flush=True)
+        sleep(delay)
 
 def main():
     try:
@@ -88,6 +109,8 @@ def main():
             run_worker(token, chat_id, minutes)
         except KeyboardInterrupt:
             print("\nАвтосбор остановлен.")
+        finally:
+            worker_status(phase="stopped", next_run=None)
 
 if __name__ == "__main__":
     main()

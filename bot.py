@@ -12,6 +12,7 @@ MENU = {
     "keyboard": [
         [{"text": "Последние"}, {"text": "Поиск"}],
         [{"text": "Kwork"}, {"text": "Freelance.ru"}],
+        [{"text": "Статус"}],
     ],
     "resize_keyboard": True,
 }
@@ -57,11 +58,53 @@ def order_messages(query="", source=""):
     except (requests.RequestException, ValueError, KeyError, TypeError):
         return [{"text": "Не удалось получить заказы. Проверь, что api.py запущен."}]
 
+def status_message():
+    try:
+        response = requests.get(get_api_url() + "/status", timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        collection = data.get("collection", {})
+        worker = data.get("worker", {})
+        if not collection and not worker:
+            return {"text": "Данных о сборе пока нет. Они появятся после запуска автосбора."}
+        lines = ["Состояние сбора"]
+        if collection:
+            lines.append("Последний итог: " + format_found_at(collection.get("updated_at")))
+            for name, source in collection.get("sources", {}).items():
+                if source.get("error"):
+                    lines.append(f"\n{name}: {source['error']}")
+                else:
+                    lines.append(f"\n{name}: получено {source['found']}")
+                lines.append("Последний успешный сбор: " + format_found_at(source.get("last_success")))
+            added = collection.get("added")
+            if added is not None:
+                lines.append(f"\nДобавлено новых в базу за сбор: {added}")
+        if worker:
+            phases = {
+                "collecting": "идёт сбор", "sending": "отправка уведомлений",
+                "finished": "цикл завершён", "waiting": "ожидание следующего сбора",
+                "error": "ошибка", "stopped": "остановлен",
+            }
+            lines.append("\nПоследняя запись автосбора: " + phases.get(worker.get("phase"), "неизвестно"))
+            lines.append("Обновлено: " + format_found_at(worker.get("updated_at")))
+            lines.append(f"Отправлено уведомлений за этот цикл: {worker.get('sent', 0)}")
+            if worker.get("error"):
+                lines.append("Ошибка: " + worker["error"])
+            if worker.get("next_run"):
+                lines.append("Следующий сбор по плану: " + format_found_at(worker["next_run"]))
+                if datetime.fromisoformat(worker["next_run"]) < datetime.now(timezone.utc):
+                    lines.append("Время следующего сбора уже прошло. Проверь окно run.py.")
+        return {"text": "\n".join(lines)}
+    except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError):
+        return {"text": "Не удалось получить состояние сбора. Проверь, что api.py запущен."}
+
 def reply_messages(text):
     if text == "/start":
         return [{"text": "Выбери действие в меню.", "reply_markup": MENU}]
     if text in ("/latest", "Последние"):
         return order_messages()
+    if text in ("/status", "Статус"):
+        return [status_message()]
     if text in SOURCE_BUTTONS:
         return order_messages(source=SOURCE_BUTTONS[text])
     if text in ("/search", "Поиск"):
@@ -138,7 +181,7 @@ if __name__ == "__main__":
             else:
                 token = sys.stdin.readline().strip()
         if re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", token):
-            print("Бот запущен. Команды: /latest и /search.")
+            print("Бот запущен. Команды: /latest, /search и /status.")
             run_bot(token)
         else:
             print("Укажи токен от BotFather в BOT_TOKEN в файле .env.")

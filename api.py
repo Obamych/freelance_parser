@@ -5,7 +5,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from config import API_HOST, get_api_port
-from storage import read_orders
+from storage import read_orders, read_status
 
 app = FastAPI()
 SOURCES = {
@@ -84,6 +84,13 @@ def home(q: str = Query(default="", max_length=100), source: Literal["", "kwork"
     {content}
 </body>
 </html>"""
+
+@app.get("/status")
+def get_status():
+    try:
+        return read_status()
+    except (sqlite3.Error, ValueError):
+        raise HTTPException(status_code=503, detail="Не удалось прочитать состояние сбора") from None
 
 @app.get("/orders")
 def get_orders(

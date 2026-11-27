@@ -7,7 +7,9 @@ from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+import requests
 import run
+from storage import update_status
 
 class RunTests(unittest.TestCase):
     def setUp(self):
@@ -70,11 +72,17 @@ class RunTests(unittest.TestCase):
         return directory
 
     def test_real_api_starts_before_clients_and_interrupt_stops_all(self):
-        self.make_project()
+        directory = self.make_project()
+        update_status("worker", {"phase": "waiting", "sent": 3}, directory / "orders.sqlite3")
 
         def interrupt(processes):
             self.assertEqual([name for name, process in processes], ["API", "Бот", "Автосбор"])
             self.assertTrue(all(process.poll() is None for name, process in processes))
+            with requests.Session() as session:
+                session.trust_env = False
+                response = session.get(run.get_api_url() + "/status", timeout=2)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["worker"]["sent"], 3)
             raise KeyboardInterrupt
 
         with patch("run.watch_processes", side_effect=interrupt):
