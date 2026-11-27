@@ -4,6 +4,7 @@ from typing import Literal
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
+from config import API_HOST, get_api_port
 from storage import read_orders
 
 app = FastAPI()
@@ -17,7 +18,6 @@ def find_orders(q, source):
         orders = read_orders()
     except sqlite3.Error:
         raise HTTPException(status_code=503, detail="Не удалось прочитать заказы из базы") from None
-
     query = q.strip().casefold()
     found = []
     for order in orders:
@@ -49,7 +49,7 @@ def home(q: str = Query(default="", max_length=100), source: Literal["", "kwork"
     elif q.strip() or source:
         content = "<p>По этим условиям заказы не найдены.</p>"
     else:
-        content = "<p>Заказов пока нет. Запусти parser.py, чтобы их собрать.</p>"
+        content = "<p>Свежих заказов пока нет. Запусти parser.py, чтобы обновить список.</p>"
 
     kwork_selected = "selected" if source == "kwork" else ""
     freelance_selected = "selected" if source == "freelance" else ""
@@ -94,7 +94,10 @@ def get_orders(
     orders = find_orders(q, source)
     return orders if limit is None else orders[:limit]
 if __name__ == "__main__":
-    host = "127.0.0.1"
-    port = 8000
-    print(f"Список заказов: http://{host}:{port}/", flush=True)
-    uvicorn.run(app, host=host, port=port)
+    try:
+        port = get_api_port()
+    except ValueError as error:
+        print(error)
+    else:
+        print(f"Список заказов: http://{API_HOST}:{port}/", flush=True)
+        uvicorn.run(app, host=API_HOST, port=port)

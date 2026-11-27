@@ -4,8 +4,8 @@ from datetime import datetime, timedelta, timezone
 from getpass import getpass
 from time import sleep
 import requests
+from config import get_api_url, get_bot_token
 
-ORDERS_URL = "http://127.0.0.1:8000/orders"
 MOSCOW = timezone(timedelta(hours=3))
 SOURCE_BUTTONS = {"Kwork": "kwork", "Freelance.ru": "freelance"}
 MENU = {
@@ -16,7 +16,6 @@ MENU = {
     "resize_keyboard": True,
 }
 SEARCH_HELP = "Добавь слово после команды. Например: /search Blender"
-
 
 def format_found_at(value):
     try:
@@ -35,15 +34,16 @@ def order_card(order):
     source = order.get("source") or "Неизвестен"
     budget = order.get("budget") or "не указан"
     found_at = format_found_at(order.get("found_at"))
+    last_seen = format_found_at(order.get("last_seen"))
     return {
-        "text": f"{title}\n\nИсточник: {source}\nБюджет: {budget}\nОбнаружено: {found_at}",
+        "text": f"{title}\n\nИсточник: {source}\nБюджет: {budget}\nОбнаружено: {found_at}\nПоследний сбор: {last_seen}",
         "reply_markup": {"inline_keyboard": [[{"text": "Открыть заказ", "url": url}]]},
     }
 
 
 def order_messages(query="", source=""):
     try:
-        response = requests.get(ORDERS_URL, params={"q": query, "source": source, "limit": 5}, timeout=5)
+        response = requests.get(get_api_url() + "/orders", params={"q": query, "source": source, "limit": 5}, timeout=5)
         response.raise_for_status()
         orders = response.json()
         if not isinstance(orders, list):
@@ -53,11 +53,10 @@ def order_messages(query="", source=""):
                 return [{"text": "По этому запросу заказы не найдены."}]
             if source:
                 return [{"text": "С этой биржи пока нет заказов."}]
-            return [{"text": "Заказов пока нет. Сначала запусти parser.py."}]
+            return [{"text": "Свежих заказов пока нет. Запусти parser.py, чтобы обновить список."}]
         return [order_card(order) for order in orders[:5]]
     except (requests.RequestException, ValueError, KeyError, TypeError):
         return [{"text": "Не удалось получить заказы. Проверь, что api.py запущен."}]
-
 
 def reply_messages(text):
     if text == "/start":
@@ -125,14 +124,19 @@ def run_bot(token):
 
 if __name__ == "__main__":
     try:
-        if sys.stdin.isatty():
-            token = getpass("Токен учебного бота: ").strip()
-        else:
-            token = sys.stdin.readline().strip()
+        get_api_url()
+        token = get_bot_token()
+        if not token:
+            if sys.stdin.isatty():
+                token = getpass("Токен учебного бота: ").strip()
+            else:
+                token = sys.stdin.readline().strip()
         if re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", token):
             print("Бот запущен. Команды: /latest и /search.")
             run_bot(token)
         else:
-            print("Введи токен, который выдал BotFather.")
+            print("Укажи токен от BotFather в BOT_TOKEN в файле .env.")
+    except ValueError as error:
+        print(error)
     except KeyboardInterrupt:
         print("\nБот остановлен.")

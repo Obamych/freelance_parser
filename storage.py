@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 DATABASE = Path(__file__).with_name("orders.sqlite3")
@@ -8,7 +8,7 @@ def order_columns(connection):
     return [column[1] for column in connection.execute("PRAGMA table_info(orders)")]
 
 
-def save_orders(orders, database=DATABASE):
+def save_orders(orders, database=DATABASE, checked_sources=()):
     connection = sqlite3.connect(database)
     try:
         connection.execute("BEGIN IMMEDIATE")
@@ -17,7 +17,9 @@ def save_orders(orders, database=DATABASE):
                 title TEXT NOT NULL,
                 url TEXT PRIMARY KEY NOT NULL,
                 budget TEXT,
-                found_at TEXT
+                found_at TEXT,
+                last_seen TEXT,
+                is_current INTEGER NOT NULL DEFAULT 0
             )
         """)
         columns = order_columns(connection)
@@ -25,18 +27,28 @@ def save_orders(orders, database=DATABASE):
             connection.execute("ALTER TABLE orders ADD COLUMN budget TEXT")
         if "found_at" not in columns:
             connection.execute("ALTER TABLE orders ADD COLUMN found_at TEXT")
+        if "last_seen" not in columns:
+            connection.execute("ALTER TABLE orders ADD COLUMN last_seen TEXT")
+        if "is_current" not in columns:
+            connection.execute("ALTER TABLE orders ADD COLUMN is_current INTEGER NOT NULL DEFAULT 0")
 
         found_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        for prefix in checked_sources:
+            connection.execute("UPDATE orders SET is_current = 0 WHERE substr(url, 1, length(?)) = ?", (prefix, prefix))
         added = 0
         for title, url, budget in orders:
             result = connection.execute("""
-                INSERT INTO orders (title, url, budget, found_at) VALUES (?, ?, ?, ?)
+                INSERT INTO orders (title, url, budget, found_at, last_seen, is_current)
+                VALUES (?, ?, ?, ?, ?, 1)
                 ON CONFLICT (url) DO NOTHING
-            """, (title, url, budget, found_at))
+            """, (title, url, budget, found_at, found_at))
             if result.rowcount:
                 added += 1
             else:
-                connection.execute("UPDATE orders SET budget = ? WHERE url = ? AND budget IS NOT ?", (budget, url, budget))
+                connection.execute("""
+                    UPDATE orders SET title = ?, budget = ?, last_seen = ?, is_current = 1
+                    WHERE url = ?
+                """, (title, budget, found_at, url))
         connection.commit()
         return added
     finally:
@@ -49,12 +61,19 @@ def read_orders(database=DATABASE):
     connection = sqlite3.connect(address, uri=True)
     try:
         columns = order_columns(connection)
+        if "is_current" not in columns or "last_seen" not in columns:
+            return []
         budget_column = "budget" if "budget" in columns else "NULL"
         time_column = "found_at" if "found_at" in columns else "NULL"
-        rows = connection.execute(f"SELECT title, url, {budget_column}, {time_column} FROM orders ORDER BY rowid DESC").fetchall()
+        since = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds")
+        rows = connection.execute(f"""
+            SELECT title, url, {budget_column}, {time_column}, last_seen
+            FROM orders WHERE is_current = 1 AND last_seen >= ?
+            ORDER BY last_seen DESC, rowid DESC
+        """, (since,)).fetchall()
     finally:
         connection.close()
     orders = []
-    for title, url, budget, found_at in rows:
-        orders.append({"title": title, "url": url, "budget": budget, "found_at": found_at})
+    for title, url, budget, found_at, last_seen in rows:
+        orders.append({"title": title, "url": url, "budget": budget, "found_at": found_at, "last_seen": last_seen})
     return orders

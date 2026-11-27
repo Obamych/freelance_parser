@@ -22,7 +22,6 @@ def kwork_budget(project):
         amount += "," + coins.ljust(2, "0")
     return "до " + amount + " ₽"
 
-
 def parse_kwork(html):
     soup = BeautifulSoup(html, "html.parser")
     for script in soup.find_all("script"):
@@ -41,6 +40,8 @@ def parse_kwork(html):
         for project in projects:
             if not isinstance(project, dict):
                 continue
+            if project.get("isWantArchive") is True or project.get("isWantActive") is False:
+                continue
             title = project.get("name")
             project_id = str(project.get("id", ""))
             if not isinstance(title, str) or not title.strip():
@@ -49,6 +50,12 @@ def parse_kwork(html):
                 continue
             link = f"{KWORK_URL}/{project_id}"
             orders.append((title.strip(), link, kwork_budget(project)))
+        if projects and not orders:
+            inactive = all(isinstance(project, dict) and (
+                project.get("isWantArchive") is True or project.get("isWantActive") is False
+            ) for project in projects)
+            if not inactive:
+                raise ValueError("Не удалось прочитать карточки заказов")
         return orders
     raise ValueError("Список заказов не найден")
 
@@ -82,20 +89,25 @@ def load_orders(name, url, parse):
         orders = parse(response.text)
     except requests.HTTPError as error:
         print(f"{name}: ошибка HTTP {error.response.status_code}")
-        return []
+        return None
     except requests.RequestException:
         print(f"{name}: не удалось загрузить страницу")
-        return []
+        return None
     except (ValueError, KeyError, TypeError):
         print(f"{name}: не удалось прочитать список заказов")
-        return []
+        return None
     print(f"{name}: найдено заказов {len(orders)}")
     return orders
 
 def main():
-    orders = load_orders("Kwork", KWORK_URL, parse_kwork)
-    orders += load_orders("Freelance.ru", FREELANCE_URL, parse_freelance)
-    if not orders:
+    orders = []
+    checked_sources = []
+    for name, url, parse in (("Kwork", KWORK_URL, parse_kwork), ("Freelance.ru", FREELANCE_URL, parse_freelance)):
+        batch = load_orders(name, url, parse)
+        if batch is not None:
+            orders += batch
+            checked_sources.append(urljoin(url, "/"))
+    if not checked_sources:
         return
     print("Найдено заказов:", len(orders))
     for title, link, budget in orders:
@@ -103,7 +115,7 @@ def main():
         print("Бюджет:", budget or "не указан")
         print(link)
     try:
-        added = save_orders(orders)
+        added = save_orders(orders, checked_sources=checked_sources)
     except sqlite3.Error:
         print("Не удалось сохранить заказы в базу")
         return
