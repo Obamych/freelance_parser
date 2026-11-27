@@ -4,7 +4,7 @@ import sqlite3
 from urllib.parse import urljoin, urlsplit
 import requests
 from bs4 import BeautifulSoup
-from storage import save_orders
+from storage import DATABASE, save_orders
 
 KWORK_URL = "https://kwork.ru/projects"
 FREELANCE_URL = "https://freelance.ru/task"
@@ -99,7 +99,7 @@ def load_orders(name, url, parse):
     print(f"{name}: найдено заказов {len(orders)}")
     return orders
 
-def main():
+def main(database=DATABASE):
     orders = []
     checked_sources = []
     for name, url, parse in (("Kwork", KWORK_URL, parse_kwork), ("Freelance.ru", FREELANCE_URL, parse_freelance)):
@@ -108,18 +108,19 @@ def main():
             orders += batch
             checked_sources.append(urljoin(url, "/"))
     if not checked_sources:
-        return
+        return False
     print("Найдено заказов:", len(orders))
     for title, link, budget in orders:
         print(title)
         print("Бюджет:", budget or "не указан")
         print(link)
     try:
-        added = save_orders(orders, checked_sources=checked_sources)
+        added = save_orders(orders, database, checked_sources=checked_sources)
     except sqlite3.Error:
         print("Не удалось сохранить заказы в базу")
-        return
+        return False
     print("Добавлено новых в базу:", added)
+    return True
 
 if __name__ == "__main__":
     main()

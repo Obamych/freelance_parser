@@ -40,7 +40,6 @@ def order_card(order):
         "reply_markup": {"inline_keyboard": [[{"text": "Открыть заказ", "url": url}]]},
     }
 
-
 def order_messages(query="", source=""):
     try:
         response = requests.get(get_api_url() + "/orders", params={"q": query, "source": source, "limit": 5}, timeout=5)
@@ -80,7 +79,10 @@ def telegram(token, method, data):
     url = f"https://api.telegram.org/bot{token}/{method}"
     response = requests.post(url, json=data, timeout=30)
     response.raise_for_status()
-    return response.json()["result"]
+    answer = response.json()
+    if not answer.get("ok"):
+        raise ValueError("Telegram не подтвердил запрос")
+    return answer["result"]
 
 def run_bot(token):
     offset = 0
@@ -111,7 +113,11 @@ def run_bot(token):
             if chat.get("type") != "private":
                 continue
             text = message.get("text", "").strip()
-            for reply in reply_messages(text):
+            if text == "/id":
+                replies = [{"text": f"Твой номер чата: {chat['id']}"}]
+            else:
+                replies = reply_messages(text)
+            for reply in replies:
                 try:
                     telegram(token, "sendMessage", {
                         "chat_id": chat["id"], **reply,

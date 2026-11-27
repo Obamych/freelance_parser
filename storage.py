@@ -7,7 +7,6 @@ DATABASE = Path(__file__).with_name("orders.sqlite3")
 def order_columns(connection):
     return [column[1] for column in connection.execute("PRAGMA table_info(orders)")]
 
-
 def save_orders(orders, database=DATABASE, checked_sources=()):
     connection = sqlite3.connect(database)
     try:
@@ -77,3 +76,40 @@ def read_orders(database=DATABASE):
     for title, url, budget, found_at, last_seen in rows:
         orders.append({"title": title, "url": url, "budget": budget, "found_at": found_at, "last_seen": last_seen})
     return orders
+
+def prepare_notifications(chat_id, database=DATABASE):
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("CREATE TABLE IF NOT EXISTS notification_chats (chat_id INTEGER PRIMARY KEY)")
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS notifications (
+                chat_id INTEGER NOT NULL,
+                url TEXT NOT NULL,
+                PRIMARY KEY (chat_id, url)
+            )
+        """)
+        result = connection.execute("INSERT INTO notification_chats VALUES (?) ON CONFLICT DO NOTHING", (chat_id,))
+        first_run = result.rowcount == 1
+        if first_run:
+            connection.execute("INSERT INTO notifications SELECT ?, url FROM orders", (chat_id,))
+        connection.commit()
+        return first_run
+    finally:
+        connection.close()
+
+def notification_urls(chat_id, database=DATABASE):
+    connection = sqlite3.connect(database)
+    try:
+        rows = connection.execute("SELECT url FROM notifications WHERE chat_id = ?", (chat_id,)).fetchall()
+        return {row[0] for row in rows}
+    finally:
+        connection.close()
+
+def mark_notified(chat_id, url, database=DATABASE):
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("INSERT INTO notifications VALUES (?, ?) ON CONFLICT DO NOTHING", (chat_id, url))
+        connection.commit()
+    finally:
+        connection.close()
